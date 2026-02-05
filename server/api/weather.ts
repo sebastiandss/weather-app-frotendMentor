@@ -1,46 +1,45 @@
 export default defineEventHandler(async (event) => {
   const query = getQuery(event);
-  
-  // Forzamos a que sea string. Si no viene nada, usamos 'Medellin'
-  const locationName = String(query.name || 'Medellin'); 
+  const locationName = String(query.name || 'Medellin');
 
   try {
-    // Ahora encodeURIComponent no se quejará porque locationName es garantizadamente un string
-    const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&language=es&format=json`;
-    
-    // ... resto del código
-    const geoData: any = await $fetch(geoUrl);
+    const geoRes: any = await $fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&language=en&format=json`);
+    if (!geoRes?.results) throw createError({ statusCode: 404, message: 'City not found' });
+    const { latitude, longitude, name, country } = geoRes.results[0];
 
-    if (!geoData.results || geoData.results.length === 0) {
-      throw createError({ statusCode: 404, statusMessage: 'Ubicación no encontrada' });
-    }
+    // Pedimos TODO: hourly (detalles y lista completa) y daily (semana)
+    const weatherRes: any = await $fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weathercode&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto`);
 
-    const { latitude, longitude, name, country } = geoData.results[0];
+    const nowISO = weatherRes.current_weather.time;
+    let i = weatherRes.hourly.time.findIndex((t: string) => t === nowISO);
+    if (i === -1) i = 0;
 
-    // PASO 2: Obtener Clima con las coordenadas obtenidas
-    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&hourly=temperature_2m,relative_humidity_2m,weathercode&timezone=auto`;
-    const weatherData: any = await $fetch(weatherUrl);
-
-    // PASO 3: Devolver un objeto limpio
     return {
       ubicacion: `${name}, ${country}`,
-      actual: weatherData.current_weather,
-      detalles: {
-        latitud: latitude,
-        longitud: longitude,
-        zona_horaria: weatherData.timezone
+      actual: {
+        temp: Math.round(weatherRes.current_weather.temperature),
+        codigo: weatherRes.current_weather.weathercode,
+        viento: Math.round(weatherRes.current_weather.windspeed),
+        // ESTADÍSTICAS PROTEGIDAS
+        sensacion: Math.round(weatherRes.hourly.apparent_temperature[i] ?? weatherRes.current_weather.temperature),
+        humedad: weatherRes.hourly.relative_humidity_2m[i] ?? 0,
+        precipitacion: weatherRes.hourly.precipitation[i] ?? 0
       },
-      // Enviamos las primeras 5 horas de pronóstico
-      pronostico: weatherData.hourly.time.slice(0, 5).map((t: string, i: number) => ({
+      // Datos para Semana.vue
+      semana: weatherRes.daily.time.map((date: string, index: number) => ({
+        name: new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long' }),
+        date: date,
+        max: Math.round(weatherRes.daily.temperature_2m_max[index]),
+        min: Math.round(weatherRes.daily.temperature_2m_min[index])
+      })),
+      // Datos para el filtrado de PronosticoHora.vue
+      hourlyRaw: weatherRes.hourly.time.map((t: string, idx: number) => ({
+        fullDate: t,
         hora: t.split('T')[1],
-        temp: weatherData.hourly.temperature_2m[i]
+        temp: Math.round(weatherRes.hourly.temperature_2m[idx])
       }))
     };
-
-  } catch (error) {
-    throw createError({
-      statusCode: 500,
-      statusMessage: 'Error al procesar la solicitud del clima'
-    });
+  } catch (e) {
+    throw createError({ statusCode: 500, message: 'Error de servidor' });
   }
 });
